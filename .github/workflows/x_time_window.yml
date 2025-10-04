@@ -1,9 +1,9 @@
 name: X Auto Post (time-window)
 on:
   schedule:
-    # 前の時刻の45〜59分（3分おき）= JST側の直前15分
+    # JST直前15分（45-59）に相当するUTC時刻
     - cron: "45-59/3 14,17,20,23,2,5,8,11 * * *"
-    # 対象時刻の0〜15分（3分おき）= JST側の直後15分
+    # JST直後15分（0-15）に相当するUTC時刻
     - cron: "0-15/3 15,18,21,0,3,6,9,12 * * *"
   workflow_dispatch:
 
@@ -28,6 +28,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
+      - name: Install Python deps
+        run: pip install -r requirements.txt
       - name: Show head of auto_post.py before run
         run: sed -n "1,80p" auto_post.py
       - name: Run poster (time-window)
