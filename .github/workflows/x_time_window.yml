@@ -1,5 +1,12 @@
-name: X Auto Post (manual/one-shot)
-on: { workflow_dispatch: {} }
+name: X Auto Post (time-window)
+on:
+  schedule:
+    # 前の時刻の45〜59分（3分おき）= JST側の直前15分
+    - cron: "45-59/3 15,18,21,0,3,6,9,12 * * *"
+    # 対象時刻の0〜15分（3分おき）= JST側の直後15分
+    - cron: "0-15/3 0,3,6,9,12,15,18,21 * * *"
+  workflow_dispatch:
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -14,8 +21,8 @@ jobs:
       X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
       SHEET_TAB: x_autopost_yoru
       SHEET_GID: 286023080
-      WINDOW_MIN: "15"
-      FORCE_ONE: "1"   # 手動時は未処理の先頭1件を強制投稿
+      WINDOW_MIN: "15"   # ±15分の判定幅（変えたい時はここ）
+      FORCE_ONE: "0"
       DRY_RUN: "0"
     steps:
       - uses: actions/checkout@v4
@@ -25,5 +32,5 @@ jobs:
       - run: |
           python -V
           pip install -r requirements.txt
-      - name: Run poster (manual)
+      - name: Run poster (time-window)
         run: python auto_post.py
