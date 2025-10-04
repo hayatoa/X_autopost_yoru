@@ -13,7 +13,6 @@ jobs:
       X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
       X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
       SHEET_TAB: x_autopost_yoru
-      SHEET_GID: 286023080
       WINDOW_MIN: "15"
       FORCE_ONE: "1"   # 手動時は未処理の先頭1件を強制投稿
       DRY_RUN: "0"
