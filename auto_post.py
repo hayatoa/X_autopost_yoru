@@ -64,44 +64,53 @@ def in_window(target_dt, now):
     return delta <= WINDOW_MIN
 
 def next_target_today(slot_str, base):
-    slot_str = str(slot_str).strip()
-    if slot_str not in SLOTS: return None
-    h = SLOTS[slot_str]
+    s = str(slot_str).strip()
+    if s not in SLOTS: return None
+    h = SLOTS[s]
     return base.replace(hour=h, minute=0)
 
 def run():
     now = now_jst_floor_minute()
     log("[INFO] now JST:", now.strftime("%Y-%m-%d %H:%M"), "window=±", WINDOW_MIN, "min")
     sheet=get_sheet()
-    rows=sheet.get_all_records()  # ヘッダーあり
+
+    # ★ここを固定：ヘッダーが空/重複でも動くよう expected_headers を強制
+    # 列の「順番」は A:slot B:text C:last_posted D:done E:tweet_id F:note （G列以降は無視）
+    expected = ["slot","text","last_posted","done","tweet_id","note","datetime_jst"]
+    rows = sheet.get_all_records(expected_headers=expected)
+
     log("[INFO] rows:", len(rows))
-    if not rows: log("[DONE] no rows"); return
+    if not rows: 
+        log("[DONE] no rows"); 
+        return
+
     df=pd.DataFrame(rows)
 
-    # ヘッダー補完
-    if "slot" not in df.columns and "datetime_jst" not in df.columns:
-        raise RuntimeError("[FATAL] need 'slot' column (or legacy 'datetime_jst')")
-    if "text" not in df.columns: raise RuntimeError("[FATAL] need 'text' column")
-    for c in ["last_posted","done","tweet_id","note"]:
+    # 必須列チェック
+    if "text" not in df.columns:
+        raise RuntimeError("[FATAL] need 'text' column")
+    for c in ["slot","last_posted","done","tweet_id","note","datetime_jst"]:
         if c not in df.columns: df[c]=""
 
     posted=False
 
-    # 1) まず slot 方式を優先
+    # 1) slot方式（毎日）
     for i,row in df.iterrows():
-        if str(row.get("done","")).strip()=="1": continue  # 旧列を尊重（未使用なら空でOK）
+        if str(row.get("done","")).strip()=="1": 
+            continue  # 旧互換列。普段は空にしておくのが推奨
         slot = row.get("slot","")
         txt  = str(row.get("text","")).strip()
-        if not txt: df.loc[i,"note"]="本文なし"; continue
+        if not txt: 
+            df.loc[i,"note"]="本文なし"; 
+            continue
 
         if slot:
             tgt = next_target_today(slot, now)
             if tgt and in_window(tgt, now):
-                # 同じ日に既に出していないかチェック
-                lp = str(row.get("last_posted","")).strip()
-                if lp == now.strftime("%Y-%m-%d"):
-                    df.loc[i,"note"]="今日分は済"; continue
-                # 投稿
+                # 同日二重防止
+                if str(row.get("last_posted","")).strip() == now.strftime("%Y-%m-%d"):
+                    df.loc[i,"note"]="今日分は済"; 
+                    continue
                 log(f"[TRY slot] row={i} slot={slot} text='{txt[:40]}'")
                 try:
                     tid=post_tweet(txt)
@@ -110,19 +119,17 @@ def run():
                     df.loc[i,"note"]=f"OK {now.strftime('%Y-%m-%d %H:%M')}"
                     posted=True
                     log(f"[OK] tweeted id={tid}")
-                    # スロット運用は1行でも出せたら終了（多重投稿防止）
                     break
                 except Exception as e:
                     df.loc[i,"note"]=f"ERR: {e}"
                     log("[ERR] post failed:", e); traceback.print_exc()
             else:
-                # ウィンドウ外 or スロット不正
                 if slot and slot not in SLOTS:
                     df.loc[i,"note"]="slotは 00:00/03:00/.../21:00 のいずれか"
                 continue
 
-    # 2) 互換：datetime_jst がある行（旧方式）をFORCE_ONE or 窓内で処理
-    if not posted and "datetime_jst" in df.columns:
+    # 2) 旧互換：datetime_jst がある行（FORCE_ONE or 窓内）
+    if not posted:
         def parse_dt(s):
             if not s: return None
             s=str(s).strip()
@@ -135,9 +142,10 @@ def run():
             txt=str(row.get("text","")).strip()
             when=parse_dt(row.get("datetime_jst",""))
             if not txt: df.loc[i,"note"]="本文なし"; continue
-            if FORCE_ONE!="1" and not in_window(when, now): 
-                if when is None: df.loc[i,"note"]="日時形式NG(YYYY-MM-DD HH:MM)"
-                continue
+            if FORCE_ONE!="1":
+                if not in_window(when, now):
+                    if when is None: df.loc[i,"note"]="日時形式NG(YYYY-MM-DD HH:MM)"
+                    continue
             log(f"[TRY dt] row={i} when={when} text='{txt[:40]}' force={FORCE_ONE}")
             try:
                 tid=post_tweet(txt)
