@@ -1,4 +1,4 @@
-name: X Auto Post (fixed 00:00 & 02:00 JST)
+name: X Auto Post (queue from Sheet at 00:00 & 02:00 JST)
 
 on:
   schedule:
@@ -6,69 +6,41 @@ on:
     - cron: "0 17 * * *"  # JST 02:00（UTC 17:00）
   workflow_dispatch:
     inputs:
-      force_post:
-        description: "手動テスト: 0000 or 0200（空なら通常運転）"
+      force_run:
+        description: "手動テストで即実行（yes で実行）"
         required: false
-        default: ""
+        default: "yes"
 
 jobs:
   post:
     runs-on: ubuntu-latest
     env:
       TZ: Asia/Tokyo
+
+      # --- Google Sheets ---
+      SHEET_ID: ${{ secrets.SHEET_ID }}
+      GCP_SA_JSON: ${{ secrets.GCP_SA_JSON }}
+      SHEET_TAB: x_autopost_yoru
+
+      # --- X API keys ---
       X_API_KEY: ${{ secrets.X_API_KEY }}
       X_API_SECRET: ${{ secrets.X_API_SECRET }}
       X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
       X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
-      TEXT_0000: "深夜0時の固定ツイート {date} {time}"
-      TEXT_0200: "深夜2時の固定ツイート {date} {time}"
-      FORCE_WHICH: ${{ github.event.inputs.force_post }}
+
+      # --- キュー方式: 1件だけ投稿 ---
+      FORCE_ONE: "1"
+      DRY_RUN: "0"
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install requests requests-oauthlib
-      - name: Post tweet
+          pip install -r requirements.txt
+      - name: Run poster (queue 1 item)
         run: |
-          python - <<'PY'
-          import os, datetime as dt, sys, requests
-          from requests_oauthlib import OAuth1
-
-          JST = dt.timezone(dt.timedelta(hours=9))
-          now = dt.datetime.now(JST)
-          hour = now.hour
-          print(f"[INFO] now JST: {now:%Y-%m-%d %H:%M} (hour={hour})")
-
-          force = (os.environ.get("FORCE_WHICH") or "").strip()
-          if force == "0000":
-              which = "0000"
-          elif force == "0200":
-              which = "0200"
-          else:
-              if hour == 0:
-                  which = "0000"
-              elif hour == 2:
-                  which = "0200"
-              else:
-                  print("[SKIP] outside schedule (not 00/02)"); sys.exit(0)
-
-          text = os.environ["TEXT_0000"] if which=="0000" else os.environ["TEXT_0200"]
-          text = text.format(date=now.strftime("%Y-%m-%d"), time=now.strftime("%H:%M"))
-          print("[INFO] posting:", text)
-
-          auth = OAuth1(
-              client_key=os.environ["X_API_KEY"],
-              client_secret=os.environ["X_API_SECRET"],
-              resource_owner_key=os.environ["X_ACCESS_TOKEN"],
-              resource_owner_secret=os.environ["X_ACCESS_TOKEN_SECRET"],
-              signature_method="HMAC-SHA1",
-          )
-          # 安定の v2 エンドポイント
-          r = requests.post("https://api.twitter.com/2/tweets", auth=auth, json={"text": text})
-          print("[HTTP]", r.status_code, r.text[:200])
-          r.raise_for_status()
-          print("[OK] tweeted id=", r.json().get("data",{}).get("id"))
-          PY
+          python auto_post.py
