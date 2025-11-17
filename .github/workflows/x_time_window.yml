@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       force_post:
-        description: "手動テスト: 0000 or 0200"
+        description: "手動テスト: 0000 or 0200（空なら通常運転）"
         required: false
         default: ""
 
@@ -15,30 +15,49 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TZ: Asia/Tokyo
+      # Xの鍵（Repo > Settings > Secrets and variables > Actions に登録済みの想定）
       X_API_KEY: ${{ secrets.X_API_KEY }}
       X_API_SECRET: ${{ secrets.X_API_SECRET }}
       X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
       X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
+
+      # 固定本文（必要に応じて編集）
       TEXT_0000: "深夜0時の固定ツイート {date} {time}"
       TEXT_0200: "深夜2時の固定ツイート {date} {time}"
+
+      # 手動実行時の指定
       FORCE_WHICH: ${{ github.event.inputs.force_post }}
+
     steps:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install requests requests-oauthlib
+
+      - name: Preflight (check env)
+        run: |
+          python - <<'PY'
+          import os, sys
+          missing = [k for k in ("X_API_KEY","X_API_SECRET","X_ACCESS_TOKEN","X_ACCESS_TOKEN_SECRET") if not os.environ.get(k)]
+          if missing:
+            print("[FATAL] missing secrets:", ", ".join(missing)); sys.exit(1)
+          print("[OK] secrets present (masked)")
+          PY
+
       - name: Post tweet
         run: |
           python - <<'PY'
-          import os, datetime as dt, sys, requests
+          import os, datetime as dt, sys, json, requests
           from requests_oauthlib import OAuth1
 
           JST = dt.timezone(dt.timedelta(hours=9), name="JST")
           now = dt.datetime.now(JST)
           hour = now.hour
+          print(f"[INFO] now JST: {now:%Y-%m-%d %H:%M} (hour={hour})")
 
           force = (os.environ.get("FORCE_WHICH") or "").strip()
           if force == "0000":
@@ -51,12 +70,11 @@ jobs:
               elif hour == 2:
                   which = "0200"
               else:
-                  print(f"[SKIP] hour={hour} JST (not 00/02)")
-                  sys.exit(0)
+                  print(f"[SKIP] outside schedule (not 00/02). Use 'force_post' input to test."); sys.exit(0)
 
           text = os.environ["TEXT_0000"] if which=="0000" else os.environ["TEXT_0200"]
           text = text.format(date=now.strftime("%Y-%m-%d"), time=now.strftime("%H:%M"))
-          print("[INFO] posting:", text)
+          print(f"[INFO] which={which}, posting: {text[:120]}")
 
           auth = OAuth1(
               client_key=os.environ["X_API_KEY"],
@@ -65,8 +83,15 @@ jobs:
               resource_owner_secret=os.environ["X_ACCESS_TOKEN_SECRET"],
               signature_method="HMAC-SHA1",
           )
-          r = requests.post("https://api.x.com/2/tweets", auth=auth, json={"text": text})
-          print("[HTTP]", r.status_code, r.text[:200])
+          # ホストは api.twitter.com を使用（安定）
+          url = "https://api.twitter.com/2/tweets"
+          r = requests.post(url, auth=auth, json={"text": text})
+          print("[HTTP]", r.status_code)
+          try:
+              print("[RESP]", r.text[:400])
+          except Exception:
+              pass
           r.raise_for_status()
-          print("[OK] tweeted id=", r.json().get("data",{}).get("id"))
+          tid = r.json().get("data",{}).get("id")
+          print("[OK] tweeted id=", tid)
           PY
