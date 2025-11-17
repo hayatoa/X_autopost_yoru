@@ -1,4 +1,4 @@
-import os, json, time, traceback, sys
+import os, json, sys
 import datetime as dt
 import pandas as pd
 import gspread
@@ -12,14 +12,15 @@ WINDOW_MIN = int(os.environ.get("WINDOW_MIN", "15"))
 def log(*a): print(*a); sys.stdout.flush()
 def need(name):
     v=os.environ.get(name)
-    if not v: raise RuntimeError(f"[FATAL] missing env: {name}"); return v
+    if not v: raise RuntimeError(f"[FATAL] missing env: {name}")
     return v
 
-SHEET_ID = need("SHEET_ID")
+# === ENV ===
+SHEET_ID  = need("SHEET_ID")
 GCP_SA_JSON = need("GCP_SA_JSON")
 SHEET_TAB = os.environ.get("SHEET_TAB", "x_autopost_yoru")
 SHEET_GID = os.environ.get("SHEET_GID")  # 例: 286023080
-FORCE_ONE = os.environ.get("FORCE_ONE","0")
+FORCE_ONE = os.environ.get("FORCE_ONE","0")     # ← 1 なら“キュー方式”で1件だけ投稿
 DRY_RUN   = os.environ.get("DRY_RUN","0")
 
 X_API_KEY = need("X_API_KEY")
@@ -27,7 +28,7 @@ X_API_SECRET = need("X_API_SECRET")
 X_ACCESS_TOKEN = need("X_ACCESS_TOKEN")
 X_ACCESS_TOKEN_SECRET = need("X_ACCESS_TOKEN_SECRET")
 
-TWEET_URL = "https://api.x.com/2/tweets"
+TWEET_URL = "https://api.twitter.com/2/tweets"
 SLOTS = {"00:00":0,"03:00":3,"06:00":6,"09:00":9,"12:00":12,"15:00":15,"18:00":18,"21:00":21}
 HEADER = ["slot","text","last_posted","done","tweet_id","note","datetime_jst"]  # A..G
 
@@ -39,7 +40,7 @@ def get_sheet():
     log("[OK] service acct:", info.get("client_email"))
     creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/spreadsheets"])
     gc = gspread.authorize(creds)
-    sh = gc.open_by_key(SHEET_ID)  # ← 正しい取得
+    sh = gc.open_by_key(SHEET_ID)
     if SHEET_GID:
         try:
             ws = sh.get_worksheet_by_id(int(SHEET_GID))
@@ -52,7 +53,7 @@ def get_sheet():
         ws = sh.sheet1; log(f"[WARN] name not found. fallback:", ws.title); return ws
 
 def read_rows(ws):
-    # 1行目は信用せず、A..G の並びで解釈（ヘッダー壊れ対策）
+    # 1行目は信用せず、A..G の並びで解釈（ヘッダー崩れ対策）
     vals = ws.get_all_values()
     if not vals or len(vals) < 2: return []
     data = []
@@ -72,7 +73,8 @@ def post_tweet(text):
                   resource_owner_key=X_ACCESS_TOKEN, resource_owner_secret=X_ACCESS_TOKEN_SECRET,
                   signature_method="HMAC-SHA1")
     r = requests.post(TWEET_URL, auth=auth, json={"text": text})
-    if r.status_code >= 400: log("[HTTP]", r.status_code, r.text)
+    if r.status_code >= 400:
+        log("[HTTP]", r.status_code, r.text)
     r.raise_for_status()
     return r.json()["data"]["id"]
 
@@ -93,26 +95,62 @@ def parse_dt(s):
         except: pass
     return None
 
+def pick_queue_row(df, today_str):
+    """textあり かつ (tweet_id空 または last_posted!=今日) の先頭行のindexを返す。なければNone。"""
+    for i,row in df.iterrows():
+        txt = str(row.get("text","")).strip()
+        if not txt: continue
+        lp  = str(row.get("last_posted","")).strip()
+        tid = str(row.get("tweet_id","")).strip()
+        if (not tid) or (lp != today_str):
+            return i
+    return None
+
 def run():
     now = now_jst_floor_minute()
+    today = now.strftime("%Y-%m-%d")
+    now_hm = now.strftime("%H:%M")
     log("[INFO] now JST:", now.strftime("%Y-%m-%d %H:%M"), "window=±", WINDOW_MIN, "min")
-    ws = get_sheet()
 
+    ws = get_sheet()
     rows = read_rows(ws)
     log("[INFO] rows:", len(rows))
-    if not rows: log("[DONE] no rows"); return
+    if not rows:
+        log("[DONE] no rows"); return
+
     df = pd.DataFrame(rows, columns=HEADER)
     for c in HEADER:
-        if c not in df.columns: df[c]=""
+        if c not in df.columns: df[c] = ""
 
     posted = False
 
-    # 1) slot 方式（毎日）
+    # === キュー方式：FORCE_ONE=1 のときは“1件だけ”投稿して終了 ===
+    if FORCE_ONE == "1":
+        qi = pick_queue_row(df, today)
+        if qi is None:
+            log("[SKIP] queue empty (no eligible row)"); write_back(ws, df); return
+        txt = str(df.loc[qi,"text"]).strip()
+        if not txt:
+            df.loc[qi,"note"] = "本文なし"
+            write_back(ws, df); return
+        log(f"[TRY queue] row={qi} text='{txt[:40]}'")
+        tid = post_tweet(txt)
+        df.loc[qi,"tweet_id"]     = tid
+        df.loc[qi,"last_posted"]  = today
+        df.loc[qi,"datetime_jst"] = now.strftime("%Y-%m-%d %H:%M")
+        df.loc[qi,"note"] = "posted(queue)"
+        posted = True
+        write_back(ws, df)
+        log("[OK] queue posted id=", tid)
+        return
+
+    # === 既存：スロット方式（必要なら残す） ===
     for i,row in df.iterrows():
-        if str(row.get("done","")).strip()=="1": continue  # 旧互換列、普段は空推奨
+        if str(row.get("done","")).strip()=="1": continue  # 旧互換、普段は空を推奨
         slot = str(row.get("slot","")).strip()
         txt  = str(row.get("text","")).strip()
-        if not txt: df.loc[i,"note"]="本文なし"; continue
+        if not txt:
+            df.loc[i,"note"]="本文なし"; continue
 
         if slot:
             tgt = next_target_today(slot, now)
@@ -120,49 +158,22 @@ def run():
                 if str(row.get("last_posted","")).strip() == now.strftime("%Y-%m-%d"):
                     df.loc[i,"note"]="今日分は済"; continue
                 log(f"[TRY slot] row={i} slot={slot} text='{txt[:40]}'")
-                try:
-                    tid = post_tweet(txt)
-                    df.loc[i,"last_posted"] = now.strftime("%Y-%m-%d")
-                    df.loc[i,"tweet_id"] = tid
-                    df.loc[i,"note"] = f"OK {now.strftime('%Y-%m-%d %H:%M')}"
-                    posted = True
-                    log(f"[OK] tweeted id={tid}")
-                    break
-                except Exception as e:
-                    df.loc[i,"note"]=f"ERR: {e}"
-                    log("[ERR] post failed:", e); traceback.print_exc()
-            else:
-                if slot and slot not in SLOTS:
-                    df.loc[i,"note"]="slotは 00:00/03:00/.../21:00 のいずれか"
-                continue
-
-    # 2) 旧互換：datetime_jst（FORCE_ONE or 窓内）
-    if not posted:
-        for i,row in df.iterrows():
-            if str(row.get("done","")).strip()=="1": continue
-            txt = str(row.get("text","")).strip()
-            when = parse_dt(row.get("datetime_jst",""))
-            if not txt: df.loc[i,"note"]="本文なし"; continue
-            if FORCE_ONE!="1":
-                if not in_window(when, now):
-                    if when is None: df.loc[i,"note"]="日時形式NG(YYYY-MM-DD HH:MM)"
-                    continue
-            log(f"[TRY dt] row={i} when={when} text='{txt[:40]}' force={FORCE_ONE}")
-            try:
                 tid = post_tweet(txt)
-                df.loc[i,"done"]="1"; df.loc[i,"tweet_id"]=tid
-                df.loc[i,"note"]=f"OK {now.strftime('%Y-%m-%d %H:%M')}"
-                posted=True
-                log(f"[OK] tweeted id={tid}")
+                df.loc[i,"tweet_id"]     = tid
+                df.loc[i,"last_posted"]  = now.strftime("%Y-%m-%d")
+                df.loc[i,"datetime_jst"] = now.strftime("%Y-%m-%d %H:%M")
+                df.loc[i,"note"]="posted(slot)"
+                posted = True
                 break
-            except Exception as e:
-                df.loc[i,"note"]=f"ERR: {e}"
-                log("[ERR] post failed:", e); traceback.print_exc()
+            else:
+                # 窓外
+                continue
 
     write_back(ws, df)
     log("[DONE] updated. posted:", posted)
 
 if __name__ == "__main__":
-    try: run()
+    try:
+        run()
     except Exception as e:
-        print("[FATAL]", e); traceback.print_exc(); sys.exit(1)
+        import traceback; traceback.print_exc(); sys.exit(1)
