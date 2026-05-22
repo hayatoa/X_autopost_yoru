@@ -39,8 +39,9 @@ jobs:
 
       - name: Gemini生成 → スプシ書き込み
         env:
-          GEMINI_API_KEY:       ${{ secrets.GEMINI_API_KEY }}
-          SHEET_ID:             ${{ secrets.SHEET_ID }}
+          GEMINI_API_KEY:            ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL_CANDIDATES:   gemini-2.5-flash-lite@v1beta,gemini-2.5-flash@v1beta,gemini-2.5-pro@v1beta
+          SHEET_ID:                  ${{ secrets.SHEET_ID }}
           SHEET_TAB:            x_autopost_yoru
           DEDUP_TAB:            ${{ secrets.DEDUP_TAB }}
           GCP_SA_JSON:          ${{ secrets.GCP_SA_JSON }}
